@@ -3,18 +3,18 @@ import os, json, base64, mysql.connector, numpy as np, cv2
 from flask_cors import CORS
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import normalize
-from scipy.spatial.distance import cosine
 import threading
 import subprocess
 from mtcnn import MTCNN
 from tensorflow.keras.models import load_model
 from siamese_model import L2Norm, EuclideanDistance
+from sklearn.neighbors import KNeighborsClassifier
 
 app = Flask(__name__)
 CORS(app)
 
-DB = {"host":"localhost","user":"root","password":"admin","database":"detection_face_db"}
-UMBRAL = 0.6  # Umbral de similitud para considerar que es la misma persona
+DB = {"host":"123","user":"123","password":"123","database":"123"}
+UMBRAL = 0.4  # Umbral de similitud para considerar que es la misma persona
 
 model_lock = threading.Lock()
 embedder = None
@@ -26,8 +26,7 @@ def load_embedder():
         if embedder is None:
             try:
                 embedder = load_model("embedder.keras", custom_objects={
-                    "L2Norm": L2Norm,
-                    "EuclideanDistance": EuclideanDistance
+                "L2Norm": L2Norm
                 })
                 print("✅ Modelo embedder cargado")
             except Exception as e:
@@ -69,6 +68,32 @@ def connect_db():
         FOREIGN KEY (id_persona) REFERENCES personas(id),
         FOREIGN KEY (id_kp) REFERENCES kp(id_kp))""")
     db.commit(); return db, c
+
+def promedio_vectores(lista_vectores):
+    vectores_np = np.array([json.loads(kp_json) for kp_json in lista_vectores])
+    vectores_np = normalize(vectores_np)  # Normaliza cada uno
+    prom = np.mean(vectores_np, axis=0)
+    return normalize([prom])[0] 
+
+def build_knn_model(personas_dict):
+    X, y = [], []
+    id_to_info = {}
+
+    for pid, datos in personas_dict.items():
+        try:
+            vector_prom = promedio_vectores(datos["vectores"])
+            X.append(vector_prom)
+            y.append(pid)
+            id_to_info[pid] = datos
+        except Exception as e:
+            continue
+
+    if not X:
+        return None, {}, []
+
+    knn = KNeighborsClassifier(n_neighbors=1, metric="cosine")
+    knn.fit(X, y)
+    return knn, id_to_info, X
 
 def extract_face_vector(img):
     detections = detector.detect_faces(img)
@@ -112,35 +137,41 @@ def reconocer():
     except Exception as e:
         return jsonify(error=f"Error en base de datos: {str(e)}"), 500
 
-    mejor_id, mejor_dist = None, float("inf")
-    persona = None
-
+    # Agrupar vectores por persona
+    personas_dict = {}
     for pid, kp_json, nombre, apellido, requisitoriado in registros:
-        try:
-            vector_base = normalize([np.array(json.loads(kp_json))])[0]
-            dist = cosine(vector_entrada, vector_base)
-            if dist < mejor_dist:
-                mejor_dist = dist
-                mejor_id = pid
-                persona = {
-                    "nombre": nombre,
-                    "apellido_paterno": apellido,
-                    "requisitoriado": bool(requisitoriado)
-                }
-        except Exception as e:
-            continue  # si algún vector está mal, lo saltamos
+        if kp_json is None:
+            continue
+        if pid not in personas_dict:
+            personas_dict[pid] = {
+                "vectores": [],
+                "nombre": nombre,
+                "apellido": apellido,
+                "requisitoriado": bool(requisitoriado)
+            }
+        personas_dict[pid]["vectores"].append(kp_json)
 
-    print(f"[DEBUG] Mejor ID: {mejor_id}, Mejor distancia: {mejor_dist}")
+    # Entrenar modelo KNN
+    knn, id_to_info, X = build_knn_model(personas_dict)
+    if knn is None or not X:
+        return jsonify(error="No hay suficientes vectores para comparar"), 500
 
-    if mejor_dist > UMBRAL or persona is None:
-        return jsonify(message="unknown", distancia=round(mejor_dist, 3)), 404
+    # Predecir ID más cercano
+    pred_id = knn.predict([vector_entrada])[0]
+    dist = knn.kneighbors([vector_entrada], return_distance=True)[0][0][0]
 
+    print(f"[DEBUG] Predicción KNN → ID: {pred_id}, distancia: {dist}")
+
+    if dist > UMBRAL or pred_id not in id_to_info:
+        return jsonify(message="unknown", distancia=round(float(dist), 3)), 404
+
+    persona = id_to_info[int(pred_id)]  # Aseguramos conversión aquí también
     return jsonify(
-        id=mejor_id,
+        id=int(pred_id),  # 👈 conversión para asegurar tipo nativo
         nombre=persona["nombre"],
-        apellido_paterno=persona["apellido_paterno"],
-        requisitoriado=persona["requisitoriado"],
-        distancia=round(mejor_dist, 3)
+        apellido_paterno=persona["apellido"],
+        requisitoriado=bool(persona["requisitoriado"]),
+        distancia=round(float(dist), 3)
     ), 200
 
 @app.route("/usuarios", methods=["GET"])
