@@ -1,4 +1,6 @@
 photos/
 ver_imagen.py
-embedder.keras
+*.keras
 __pycache__/
+Celeba/
+celeba_por_persona/

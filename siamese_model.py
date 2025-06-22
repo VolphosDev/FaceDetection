@@ -9,32 +9,40 @@ class L2Norm(Layer):
         return tf.math.l2_normalize(inputs, axis=1)
 
 @tf.keras.utils.register_keras_serializable()
-class EuclideanDistance(Layer):
+class CosineDistance(Layer):
     def call(self, inputs):
         x, y = inputs
-        return tf.sqrt(tf.reduce_sum(tf.square(x - y), axis=1, keepdims=True))
+        x = tf.math.l2_normalize(x, axis=1)
+        y = tf.math.l2_normalize(y, axis=1)
+        cosine_similarity = tf.reduce_sum(x * y, axis=1, keepdims=True)
+        return 1.0 - cosine_similarity  # distancia coseno
 
 @tf.keras.utils.register_keras_serializable()
 def contrastive_loss(margin=1.0):
     def loss(y_true, y_pred):
         square_pred = K.square(y_pred)
         margin_square = K.square(K.maximum(margin - y_pred, 0))
+        y_true = K.cast(y_true, "float32")
         return K.mean(y_true * square_pred + (1 - y_true) * margin_square)
     return loss
 
 def build_embedder(input_shape, embed_dim=128, use_l2norm=True):
     input = layers.Input(shape=input_shape)
 
-    x = layers.Conv2D(32, (3, 3), activation="relu", padding="same")(input)
-    x = layers.MaxPooling2D()(x)
-
-    x = layers.Conv2D(64, (3, 3), activation="relu", padding="same")(x)
+    x = layers.Conv2D(64, (3, 3), activation="relu", padding="same")(input)
+    x = layers.BatchNormalization()(x)
     x = layers.MaxPooling2D()(x)
 
     x = layers.Conv2D(128, (3, 3), activation="relu", padding="same")(x)
+    x = layers.BatchNormalization()(x)
     x = layers.MaxPooling2D()(x)
 
     x = layers.Conv2D(256, (3, 3), activation="relu", padding="same")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D()(x)
+
+    x = layers.Conv2D(512, (3, 3), activation="relu", padding="same")(x)
+    x = layers.BatchNormalization()(x)
     x = layers.GlobalAveragePooling2D()(x)
 
     x = layers.Dense(embed_dim)(x)
@@ -60,12 +68,3 @@ def build_siamese(input_shape, embed_dim=128, use_l2norm=True, base_model=None):
 
     siamese_model = models.Model([input_a, input_b], distance)
     return siamese_model, embedder
-
-@tf.keras.utils.register_keras_serializable()
-class CosineDistance(Layer):
-    def call(self, inputs):
-        x, y = inputs
-        x = tf.math.l2_normalize(x, axis=1)
-        y = tf.math.l2_normalize(y, axis=1)
-        cosine_similarity = tf.reduce_sum(x * y, axis=1, keepdims=True)
-        return 1.0 - cosine_similarity  # distancia coseno

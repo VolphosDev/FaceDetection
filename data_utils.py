@@ -4,10 +4,10 @@ import cv2
 
 def load_faces_from_db():
     db = mysql.connector.connect(
-        host="123",
-        user="123",
-        password="123",
-        database="123"
+        host="localhost",
+        user="root",
+        password="admin",
+        database="face_detection_db"
     )
     c = db.cursor()
     c.execute("""

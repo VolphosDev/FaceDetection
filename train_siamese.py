@@ -1,7 +1,6 @@
 import os
 import cv2
 import numpy as np
-from sklearn.utils import shuffle
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.optimizers import Adam
 from siamese_model import build_siamese, contrastive_loss
@@ -25,8 +24,8 @@ if gpus:
 else:
     print("[🧱] No se detectó GPU, usando CPU.")
 
-DATASET_PATH = "lfw-deepfunneled"
-IMG_SIZE = (128, 128)
+DATASET_PATH = "celeba_por_persona"
+IMG_SIZE = (128,128)
 
 def load_dataset():
     images = []
@@ -34,8 +33,14 @@ def load_dataset():
     label_map = {}
     current_label = 0
 
+    max_personas = 4000
+    personas_procesadas = 0
+
     print("[📥] Cargando imágenes del dataset externo (solo personas con ≥2 fotos)...")
     for person_name in tqdm(os.listdir(DATASET_PATH)):
+        if personas_procesadas >= max_personas:
+            break
+
         person_dir = os.path.join(DATASET_PATH, person_name)
         if not os.path.isdir(person_dir):
             continue
@@ -61,41 +66,48 @@ def load_dataset():
                 current_label += 1
             labels.append(label_map[person_name])
 
+        personas_procesadas += 1
+
     return np.array(images), np.array(labels)
 
-def make_pairs(images, labels):
-    print("[🔗] Generando pares positivos y negativos...")
-    pairs = []
-    pair_labels = []
+def data_generator(images, labels, batch_size):
     label_to_indices = {}
-
     for idx, label in enumerate(labels):
         label = int(label)
         if label not in label_to_indices:
             label_to_indices[label] = []
         label_to_indices[label].append(idx)
 
-    for idx, img in enumerate(images):
-        current_label = int(labels[idx])
+    while True:
+        pair_images_a = []
+        pair_images_b = []
+        pair_labels = []
 
-        # 🔁 Par positivo (misma persona)
-        pos_idx = idx
-        while pos_idx == idx:
-            pos_idx = np.random.choice(label_to_indices[current_label])
-        pos_img = images[pos_idx]
-        pairs.append([img, pos_img])
-        pair_labels.append(1)
+        for _ in range(batch_size):
+            idx = np.random.randint(0, len(images))
+            img = images[idx]
+            label = labels[idx]
 
-        # ❌ Par negativo (persona diferente)
-        neg_label = current_label
-        while neg_label == current_label:
-            neg_label = np.random.choice(list(label_to_indices.keys()))
-        neg_idx = np.random.choice(label_to_indices[neg_label])
-        neg_img = images[neg_idx]
-        pairs.append([img, neg_img])
-        pair_labels.append(0)
+            # Par positivo
+            pos_idx = idx
+            while pos_idx == idx:
+                pos_idx = np.random.choice(label_to_indices[label])
+            pos_img = images[pos_idx]
+            pair_images_a.append(img)
+            pair_images_b.append(pos_img)
+            pair_labels.append(1)
 
-    return np.array(pairs), np.array(pair_labels)
+            # Par negativo
+            neg_label = label
+            while neg_label == label:
+                neg_label = np.random.choice(list(label_to_indices.keys()))
+            neg_idx = np.random.choice(label_to_indices[neg_label])
+            neg_img = images[neg_idx]
+            pair_images_a.append(img)
+            pair_images_b.append(neg_img)
+            pair_labels.append(0)
+
+        yield [np.array(pair_images_a), np.array(pair_images_b)], np.array(pair_labels)
 
 def main():
     # --- Cargar y preparar datos ---
@@ -106,33 +118,27 @@ def main():
         print("[⚠️] Muy pocos datos. Revisa si hay suficientes personas con ≥2 fotos.")
         return
 
-    pairs, labels = make_pairs(X, y)
-    pairs, labels = shuffle(pairs, labels, random_state=42)
-
-    # --- Separar en entrenamiento y validación ---
-    split = int(0.8 * len(pairs))
-    tr_p, va_p = pairs[:split], pairs[split:]
-    tr_l, va_l = labels[:split], labels[split:]
-
     # --- Construir modelo siamés robusto ---
     print("[🧠] Entrenando modelo siamés...")
-    siamese, embedder = build_siamese(input_shape=X.shape[1:], embed_dim=64, use_l2norm=True)
+    siamese, embedder = build_siamese(input_shape=X.shape[1:], embed_dim=128, use_l2norm=True)
     siamese.compile(optimizer=Adam(learning_rate=1e-4), loss=contrastive_loss(margin=1.0))
 
-        # --- Callback: detener si no mejora ---
+    # --- Callback: detener si no mejora ---
     early_stop = EarlyStopping(
-        monitor='val_loss',
+        monitor='loss',
         patience=5,
         restore_best_weights=True,
         verbose=1
     )
 
-    # --- Entrenamiento con callback y gráfico ---
+    # --- Entrenamiento con generador ---
+    batch_size = 16
+    steps_per_epoch = len(X) // batch_size
+
     history = siamese.fit(
-        [tr_p[:, 0], tr_p[:, 1]], tr_l,
-        validation_data=([va_p[:, 0], va_p[:, 1]], va_l),
+        data_generator(X, y, batch_size),
+        steps_per_epoch=steps_per_epoch,
         epochs=50,
-        batch_size=32,
         callbacks=[early_stop],
         verbose=1
     )
@@ -144,7 +150,6 @@ def main():
     # --- Graficar historial de pérdida ---
     plt.figure(figsize=(8, 5))
     plt.plot(history.history['loss'], label='Pérdida entrenamiento')
-    plt.plot(history.history['val_loss'], label='Pérdida validación')
     plt.title('Curva de pérdida del modelo siamés')
     plt.xlabel('Época')
     plt.ylabel('Pérdida')
@@ -154,7 +159,6 @@ def main():
     plt.savefig("train_loss.png")
     plt.show()
     print("📊 Gráfico guardado como 'train_loss.png'")
-
 
 if __name__ == "__main__":
     main()
